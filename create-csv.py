@@ -1,17 +1,17 @@
-import json
-import csv
-import os
-import urllib.parse
-import urllib.request
-import re
-import time
-import psycopg2
-import jellyfish
 from itertools import *
 from optparse import OptionParser
-import logging
-import sys
 import configparser
+import csv
+import jellyfish
+import json
+import logging
+import os
+import psycopg2
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
 
 opts = OptionParser()
 opts.add_option('-u', '--user', dest='db_user', help="User to log into the database as",metavar="USER")
@@ -316,7 +316,8 @@ def string_to_address(raw_address):
          "Square",
          "Sqr",
          "Suite",
-         "Ste"
+         "Ste",
+         "PO Box"
       ]
       terms_to_break_after = [
          "Building",
