@@ -8,10 +8,82 @@ import time
 import psycopg2
 import jellyfish
 from itertools import *
+from optparse import OptionParser
+import logging
+import sys
+import configparser
 
-conn = psycopg2.connect("dbname=ls user=jim")
+opts = OptionParser()
+opts.add_option('-u', '--user', dest='db_user', help="User to log into the database as",metavar="USER")
+opts.add_option('-D', '--db', dest='db_name', help="Database to log into",metavar="DB_NAME")
+opts.add_option('-d', '--host', dest='db_host', help="Database host to log into (Default: localhost)",metavar="DB_HOST")
+opts.add_option('-v', '--verbosity', dest='verbosity', help="How much should I complain? OFF, CRITICAL, ERROR, WARNING, INFO or DEBUG (Default: DEBUG)", metavar="VERBOSITY")
+opts.add_option('-c', '--config', dest='config', help="Location of a config file",metavar="CONFIG")
+opts.add_option('-o', '--outfile', dest='outfile', help="Name of the output file (- is stdout) (Default: ./legislators.csv)",metavar="OUTFILE", default="./legislators.csv")
+opts.add_option('-l', '--logfile', dest='logfile', help="Name of the log file (- is stderr) (Default: -)",metavar="LOGFILE")
+opts.add_option('-i', '--indir', dest='indir', help="Location of the input directory (Default: ./openstates.org/legislators)",metavar="INDIR")
+
+(options, args) = opts.parse_args()
+
+if options.config is not None:
+   config = configparser.SafeConfigParser()
+   if 0 == len(config.read(options.config)):
+      print("Config file '%s' is not valid" % options.config)
+      exit()
+   if 'database' in config:
+      if 'user' in config['database'] and options.db_user is None: options.db_user = config['database']['user']
+      if 'host' in config['database'] and options.db_host is None: options.db_host = config['database']['host']
+      if 'name' in config['database'] and options.db_name is None: options.db_name = config['database']['name']
+   if 'logging' in config:
+      if 'level' in config['logging'] and options.verbosity is None:  options.verbosity = config['logging']['level']
+      if 'file' in config['logging'] and options.logfile is None: options.logfile = config['logging']['file']
+   if 'parsing' in config:
+      if 'indir' in config['parsing'] and options.indir is None: options.indir = config['parsing']['indir']
+      if 'outfile' in config['parsing'] and options.outfile is None: options.outfile = config['parsing']['outfile']
+
+if options.db_host is None: options.db_host = 'localhost'
+if options.verbosity is None:  options.verbosity = 'DEBUG'
+if options.logfile is None: options.logfile = '-'
+if options.indir is None: options.indir = './openstates.org/legislators'
+if options.outfile is None: options.outfile = './legislators.csv'
+
+
+conn = psycopg2.connect(database=options.db_name, user=options.db_user)
 cur = conn.cursor()
 
+
+log_levels = {
+   "OFF": None,
+   "CRITICAL": logging.CRITICAL,
+   "ERROR":  logging.ERROR,
+   "WARNING": logging.WARNING,
+   "INFO":  logging.INFO,
+   "DEBUG": logging.DEBUG
+}
+if options.verbosity not in log_levels:
+   print("%s is not a valid log level" % options.verbosity)
+   exit()
+options.verbosity = log_levels[options.verbosity]
+hdlr = logging.NullHandler()
+if options.verbosity is None:
+   options.verbosity = logging.CRITICAL
+if options.logfile == '-':
+   options.logfile = sys.stderr
+   hdlr = logging.StreamHandler(options.logfile)
+else:
+   hdlr = logging.FileHandler(options.logfile)
+if options.outfile == '-':
+   options.outfile = sys.stdout
+
+
+# Modified from
+# http://docs.python.org/3/library/logging.html
+logger = logging.getLogger('openstates')
+formatter = logging.Formatter('%(cur_file)s %(message)s')
+
+hdlr.setFormatter(formatter)
+logger.addHandler(hdlr) 
+logger.setLevel(options.verbosity)
 
 # Taken from
 # http://docs.python.org/2/library/itertools.html#recipes
@@ -186,7 +258,7 @@ def string_to_address(raw_address):
        # 90% (Why 90%? I felt like it?) we'll use that as
        # the city, otherwise we discard and move on.
        for i in range(5, zipcode_match.start()):
-         if raw_address_upper[i-1] == " ":
+         if not raw_address_upper[i-1].isalnum():
             score = jellyfish.jaro_distance(canidate_city, raw_address_upper[i:i+len(canidate_city)])
             if score > best_score:
                best_city_start_index = i
@@ -291,7 +363,7 @@ def string_to_address(raw_address):
                address['street'] = re.sub(r"%s(\b)" % term, r"%s\1" % terms_to_switch[term], address['street'])
     return address
 
-with open('legislators.csv', 'w') as csv_file:
+with open(options.outfile, 'w') as csv_file:
    out = csv.DictWriter(csv_file, [
       'sunlight_id',
       'votesmart_id',
@@ -317,8 +389,9 @@ with open('legislators.csv', 'w') as csv_file:
       'fax'
    ], extrasaction='ignore')
    out.writeheader()
-   for root, dirs, filenames in os.walk('openstates.org/legislators'):
+   for root, dirs, filenames in os.walk(options.indir):
       for f in filenames:
+         log_extra = {"cur_file": f}
          with open(os.path.join(root, f), 'r') as json_file:
             leg = json.load(json_file)
             leg['sunlight_id'] = leg['id']
@@ -352,12 +425,12 @@ with open('legislators.csv', 'w') as csv_file:
 
             # If they don't have an address I can't use them
             if 'office_address' not in leg or leg['office_address'] is None:
-               print("Could not find an address", f)
+               logger.warning("Could not find an address", extra=log_extra)
                continue
 
             # If they don't have a district, I can't use them
             if 'district' not in leg:
-               print("Could not find a district", f)
+               logger.warning("Could not find a district", extra=log_extra)
                continue
 
             # I just want 10-digit phone/fax numbers, no formatting
@@ -378,8 +451,7 @@ with open('legislators.csv', 'w') as csv_file:
             try:
                address = string_to_address(leg['office_address'])
             except Exception as e:
-               print("Problem with file '%s'" % f)
-               print(e)
+               logger.error(e, extra=log_extra)
                continue
             for part in address:
                if part == "phone":
