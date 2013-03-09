@@ -13,11 +13,14 @@ conn = psycopg2.connect("dbname=ls user=jim")
 cur = conn.cursor()
 
 
+# Taken from
+# http://docs.python.org/2/library/itertools.html#recipes
 def powerset(iterable):
    "powerset([1,2,3]) --> () (1,) (2,) (3,) (1,2) (1,3) (2,3) (1,2,3)"
    s = list(iterable)
    return chain.from_iterable(combinations(s, r) for r in range(len(s)+1))
 
+# Makes a call to Google's geocoding service
 def check_google_because_I_give_up(raw_address):
    address = {
      'street_number': None, # This isn't yet parsed out, but it's on the list
@@ -53,6 +56,7 @@ def check_google_because_I_give_up(raw_address):
                   address['state'] = part['short_name']
                elif 'postal_code' in part['types']:
                   address['zip'] = part['short_name']
+   return address
 
 
 def zipcode_to_city_list(zipcode):
@@ -81,9 +85,12 @@ def zipcode_to_city_list(zipcode):
          for mod in mods:
             c = mod(c)
          mod_city_names.append(c)
-    return set(zips + mod_city_names)
+    def len_0(x):
+      return len(x[0])
+    return set(sorted(zips + mod_city_names, key=len_0, reverse=True))
 
 def string_to_address(raw_address):
+    original_raw_address = raw_address
     address = {
       'street_number': None, # This isn't yet parsed out, but it's on the list
       'street': None, # PO Boxes will be stuck into this field, fwiw
@@ -163,6 +170,9 @@ def string_to_address(raw_address):
 
     raw_address_upper = raw_address.upper()
     cities = zipcode_to_city_list(zip5)
+    best_city_start_index = None
+    best_city_name = None
+    best_score = 0
     for (canidate_city, canidate_state) in cities:
        # This is a super naive way of doing this
        # We create a sliding window the length of
@@ -175,20 +185,19 @@ def string_to_address(raw_address):
        # window, and if its score is greater greater than
        # 90% (Why 90%? I felt like it?) we'll use that as
        # the city, otherwise we discard and move on.
-       city_start_index = None
-       best_score = 0
-       for i in range(5, len(raw_address_upper) + zipcode_match.start() - len(canidate_city)):
-         score = jellyfish.jaro_distance(canidate_city, raw_address_upper[i:i+len(canidate_city)])
-         if score > best_score:
-            city_start_index = i
-            best_score = score
-       if best_score < 0.9:
-          city_start_index = None
-       if city_start_index:
-          address['state'] = canidate_state
-          address['city'] = raw_address[city_start_index:city_start_index+len(canidate_city)]
-          address['street'] = raw_address[:city_start_index-1] #rm the space
-          break
+       for i in range(5, zipcode_match.start()):
+         if raw_address_upper[i-1] == " ":
+            score = jellyfish.jaro_distance(canidate_city, raw_address_upper[i:i+len(canidate_city)])
+            if score > best_score:
+               best_city_start_index = i
+               best_score = score
+               best_city_name = canidate_city
+    if best_score < 0.9:
+       best_city_start_index = None
+    if best_city_start_index:
+       address['state'] = canidate_state
+       address['city'] = raw_address[best_city_start_index:best_city_start_index+len(best_city_name)]
+       address['street'] = raw_address[:best_city_start_index-1] #rm the space
 
     # At this point the failurs I'm seeing are related to
     # cities not in my zipcode <-> city database
@@ -198,7 +207,7 @@ def string_to_address(raw_address):
        address = check_google_because_I_give_up(raw_address)
 
     # OK, I really don't know what's going on
-    if address['city'] is None:
+    if address['street'] is None or address['city'] is None:
        raise Exception("No cities in the found zipcode match the raw address string.\n\tRaw: %s\n\tCanidates: %s" % (raw_address_upper, cities))
 
     # It should be PO Box, not anything else
@@ -216,6 +225,70 @@ def string_to_address(raw_address):
     for pos_phone in phone_match:
        if pos_phone.start() > zipcode_match.end():
           address['phone'] =  re.sub(r'\D', '', pos_phone.group(5))
+    # Max Length is 8 words or 40 characters per line
+    # Up to now, street is a single line
+    # Since the street line is the longest, it's all
+    # I'll worry about here.
+    # Publication 28 Section 35
+    # http://pe.usps.com/text/pub28/28c3_015.htm
+    if len(address['street']) > 40 or len(address['street'].split(' ')) > 8:
+      terms_to_break_before = [
+         "Room",
+         "Rm",
+         "Square",
+         "Sqr",
+         "Suite",
+         "Ste"
+      ]
+      terms_to_break_after = [
+         "Building",
+         "District",
+         "Center",
+         "House of Representatives",
+         "House",
+         "Leader",
+         "Pro Tempore",
+         "Whip"
+      ]
+      # Some abbreviations from
+      # Publication 28 Appendix G: Business Word Abbreviations
+      # http://pe.usps.com/text/pub28/28apg.htm
+      terms_to_switch = {
+         "Building": "BLDG",
+         "Station": "STA",
+         "Plaza": "PLZ",
+         "Memorial": "MEML",
+         "Office": "OFC",
+         "North": "N",
+         "South": "S",
+         "West": "W",
+         "East": "E",
+         "Avenue": "AVE",
+         "Street": "ST",
+         "Road": "RD",
+         "Circle": "CIR",
+         "Center": "CTR",
+         "House": "HSE",
+         "Suite": "STE",
+         "Square": "SQR",
+         "Capitol": "CPTOL",
+         "Capital": "CPTAL",
+         "Senator": "SEN",
+         "Representative": "REP",
+         "Leader": "LDR",
+      }
+      address['street'] = address['street'].replace('.', '')
+      for term in terms_to_break_before:
+         address['street'] = address['street'].replace(" %s " % term, "\n%s " % term, 1)
+      for term in terms_to_break_after:
+         address['street'] = address['street'].replace("%s " % term, "%s\n" % term, 1)
+      # Check if we fixed or did anything?
+      # If not a last ditch effort is to replace 
+      # what we can with abbreviations
+      for first_line in address['street'].split("\n"):
+         if len(first_line) > 40 or len(first_line.split(' ')) > 8:
+            for term in terms_to_switch:
+               address['street'] = re.sub(r"%s(\b)" % term, r"%s\1" % terms_to_switch[term], address['street'])
     return address
 
 with open('legislators.csv', 'w') as csv_file:
@@ -246,53 +319,72 @@ with open('legislators.csv', 'w') as csv_file:
    out.writeheader()
    for root, dirs, filenames in os.walk('openstates.org/legislators'):
       for f in filenames:
-         #if not f.startswith('HI'):
-         #   continue
-         #print("working on: ",f)
          with open(os.path.join(root, f), 'r') as json_file:
             leg = json.load(json_file)
             leg['sunlight_id'] = leg['id']
 
             addys = None
+            # Loop over all the available offices
+            # I would prefer to use the capitol office
+            # address, but if that isn't available, then
+            # use what's listed first
             if len(leg['offices']):
                addys = [x for x in leg['offices'] if x['type'] == "capitol"]
                if addys is None or len(addys) == 0:
                   addys = [leg['offices'][0]]
                addys = addys[0]
+
+               # Pull the data from the office address section
+               # if it's not listed in the main section
+               #
+               # The last condition for the address
+               # is because the longer address is probably better
                if 'office_address' not in leg or \
                   leg['office_address'] is None or \
-                  len(leg['office_address']) < len(addys['address']):
+                  len(leg['office_address']) < len(addys['address']): 
                   leg['office_address'] = addys['address']
-               if 'email' not in leg or leg['email'] is None:
+               if leg.get('email') is None:
                   leg['email'] = addys['email']
-               if 'phone' not in leg or leg['phone'] is None:
+               if leg.get('phone') is None:
                   leg['phone'] = addys['phone']
-               if 'fax' not in leg or leg['fax'] is None:
+               if leg.get('fax') is None:
                   leg['fax'] = addys['fax']
+
+            # If they don't have an address I can't use them
             if 'office_address' not in leg or leg['office_address'] is None:
                print("Could not find an address", f)
                continue
+
+            # If they don't have a district, I can't use them
             if 'district' not in leg:
                print("Could not find a district", f)
                continue
 
+            # I just want 10-digit phone/fax numbers, no formatting
             if 'phone' in leg and leg['phone'] is not None:
                leg['phone'] = re.sub(r'\D', '', leg['phone'])
             if 'fax' in leg and leg['fax'] is not None:
                leg['fax'] = re.sub(r'\D', '', leg['fax'])
+
+            # I guess some email addresses are getting cut
+            # off for some reason, so lets fix them
             if 'email' in leg and leg['email'] is not None:
                if leg['email'].endswith('.c'):
                   leg['email'] = leg['email'] + 'om'
                if leg['email'].endswith('.ne'):
                   leg['email'] = leg['email'] + 't'
 
+            # Let's try to make sense of the address we have
             try:
                address = string_to_address(leg['office_address'])
             except Exception as e:
                print("Problem with file '%s'" % f)
                print(e)
                continue
-
             for part in address:
-               leg[part] = address[part]
+               if part == "phone":
+                  leg[part] = address[part]
+               else:
+                  leg["office_" + part] = address[part]
+
             out.writerow(leg)
