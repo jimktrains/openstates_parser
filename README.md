@@ -1,7 +1,11 @@
 This is a parser and address normalizer for the bulk data from [OpenStates](http://openstates.org/downloads/)
 
 A large portion of this code is devoted to taking unstructred address strings and turning them into
-structured data with the help of [TIGER](http://www.census.gov/geo/maps-data/data/tiger.html) and [http://federalgovernmentzipcodes.us/](http://federalgovernmentzipcodes.us/)
+structured data with the help of [http://federalgovernmentzipcodes.us/](http://federalgovernmentzipcodes.us/).
+
+(Eventually I'd like to use [TIGER](http://www.census.gov/geo/maps-data/data/tiger.html) data to help with the parsing and normalization.)
+
+Please see [free-zipcode-database-parser](https://github.com/jimktrains/free-zipcode-database-parser) for the table required.
 
 My most current address normalization and the errors encountered can be found at [http://jimkeener.com/state-legislators.tar.bz2](http://jimkeener.com/state-legislators.tar.bz2).
 
