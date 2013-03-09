@@ -194,7 +194,8 @@ def string_to_address(raw_address):
     # cities not in my zipcode <-> city database
     # I could get more creative, but I don't know if its
     # worth it right now
-    address = check_google_because_I_give_up(raw_address)
+    if address['city'] is None:
+       address = check_google_because_I_give_up(raw_address)
 
     # OK, I really don't know what's going on
     if address['city'] is None:
