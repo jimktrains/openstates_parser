@@ -6,61 +6,139 @@ import urllib.request
 import re
 import time
 import psycopg2
+import jellyfish
+from itertools import *
+
 conn = psycopg2.connect("dbname=ls user=jim")
 cur = conn.cursor()
 
-def string_to_address(address)
-    leg['office_address'] = re.sub(r'\s+', ' ', leg['office_address'])
-    leg['office_address'] = leg['office_address'].replace(',', '')
-    matches = re.finditer(r'((\d{5})(-\d{4})?)', leg['office_address'])
+
+def powerset(iterable):
+   "powerset([1,2,3]) --> () (1,) (2,) (3,) (1,2) (1,3) (2,3) (1,2,3)"
+   s = list(iterable)
+   return chain.from_iterable(combinations(s, r) for r in range(len(s)+1))
+
+def zipcode_to_city_list(zipcode):
+    # This will return all of the cities that have out best-guess zipcode
+    cur.execute("SELECT * FROM zips WHERE zipcode = %s;", [zipcode])
+    zips = [(x[3], x[4]) for x in cur]
+
+    # This list of lambdas are a collection of changes that
+    # could be made to an address. They should accept and return
+    # in all caps with no punctuation
+    base_city_modifications = [
+      lambda t : (t[0].replace('SAINT', 'ST'), t[1]),
+      lambda t : (t[0].replace('CENTER', 'CTR'), t[1]),
+      lambda t : (t[0].replace('JUNCTION', 'JCT'), t[1]),
+      lambda t : (t[0].replace('EAST', 'E'), t[1]),
+      lambda t : (t[0].replace('WEST', 'W'), t[1]),
+      lambda t : (t[0].replace('NORTH', 'N'), t[1]),
+      lambda t : (t[0].replace('SOUTH', 'S'), t[1])
+    ]
+    city_modifications = powerset(base_city_modifications)
+    mod_city_names = []
+    for city_state in zips:
+       city_state = (re.sub(r'\s+', ' ', re.sub(r'[^0-9a-zA-Z]',' ', city_state[0])), city_state[1])
+       for mods in city_modifications:
+         c = city_state
+         for mod in mods:
+            c = mod(c)
+         mod_city_names.append(c)
+    return set(zips + mod_city_names)
+
+def string_to_address(raw_address):
+    address = {
+      'street_number': None, # This isn't yet parsed out, but it's on the list
+      'street': None, # PO Boxes will be stuck into this field, fwiw
+                     # Street numbers + street are currently kept in this field
+      'city': None,
+      'state': None,
+      'zipcode': None,
+      'phone': None # Yes, Yes, this isn't part of an address, but a lot of the raw data
+                  # has phone numbers in them and we need to collect them
+
+    }
+
+    # Commas and extra spaces are annoying
+    # burn them!
+    raw_address = re.sub(r'\s+', ' ', raw_address)
+    raw_address = raw_address.replace(',', '')
+
+    # All US Zipcodes are 5 digits with an optional +4 section, a hyphen followed by 4 digits
+    matches = re.finditer(r'((\d{5})(-\d{4})?)', raw_address)
     good_zip_found = False
-    for pos_zip in matches:
-       if pos_zip.start() < 10:
+    for canidate_zipcode in matches:
+       # If the canidate zipcode is closer to the start
+       # of the raw address it's probably not a zipcode
+       if canidate_zipcode.start() < 10:
           continue
-       good_zip_found = pos_zip
-       if pos_zip.group(3) is not None:
+       # Since we have a canidate not near the start, lets
+       # go ahead and use it. Note that this means we're using
+       # the last canidate...
+       good_zip_found = canidate_zipcode
+       # ...unless it's a zip+4 code, then we're pretty sure
+       # we're dealing with a zipcode, so we'll just use that,
+       # really
+       if canidate_zipcode.group(3) is not None:
           break
     if not good_zip_found:
-       print(leg['office_address'])
-       print("No good zipcode match found", f)
-       continue
-    matches = pos_zip
-    leg['office_zip'] = matches.group(1)
-    zip5 = matches.group(2)
-    zip4 = matches.group(3)
-    cur.execute("SELECT * FROM zips WHERE zipcode = %s;", [zip5])
-    for zip_city in cur:
-       pos = leg['office_address'].upper().rfind(zip_city[3].upper(), 0, matches.start())
-       if pos != -1:
-          leg['office_state'] = zip_city[4]
-          leg['office_city'] = leg['office_address'][pos:pos+len(zip_city[3])]
-          leg['office_street'] = leg['office_address'][:pos-1] #rm the space
+      raise Exception('No canidate zipcode found')
+
+    zipcode_match = canidate_zipcode
+
+    # Store the full Zip+4
+    address['zip'] = zipcode_match.group(1)
+    zip5 = zipcode_match.group(2)
+    zip4 = zipcode_match.group(3)
+
+    raw_address_upper = raw_address.upper()
+    cities = zipcode_to_city_list(zip5)
+    for (canidate_city, canidate_state) in cities:
+       # This is a super naive way of doing this
+       # We create a sliding window the length of
+       # the canidate city and slide it from index 5
+       # to the end. (Why 5? The city won't be that early
+       # in the string.) We then take the contents of the
+       # sliding window and calculator the Jaro-Winkler
+       # Distance (https://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance)
+       # of it and the canidate.  We then take the best
+       # window, and if its score is greater greater than
+       # 90% (Why 90%? I felt like it?) we'll use that as
+       # the city, otherwise we discard and move on.
+       city_start_index = None
+       best_score = 0
+       for i in range(5, len(raw_address_upper) + zipcode_match.start() - len(canidate_city)):
+         score = jellyfish.jaro_distance(canidate_city, raw_address_upper[i:i+len(canidate_city)])
+         if score > best_score:
+            city_start_index = i
+            best_score = score
+       if best_score < 0.9:
+          city_start_index = None
+       if city_start_index:
+          address['state'] = canidate_state
+          address['city'] = raw_address[city_start_index:city_start_index+len(canidate_city)]
+          address['street'] = raw_address[:city_start_index-1] #rm the space
           break
-       else:
-          mod_city = re.sub(r'\s+', ' ', re.sub(r'[^0-9a-zA-Z]',' ', zip_city[3])).upper().replace('SAINT', 'ST').replace('CENTER', 'CTR').replace('JUNCTION', 'JCT')
-          pos = re.sub(r'\s+', ' ', re.sub(r'[^0-9a-zA-Z]',' ', leg['office_address'])).upper().rfind(mod_city.upper(), 0, matches.start())
-          if pos != -1:
-             leg['office_state'] = zip_city[4]
-             leg['office_city'] = leg['office_address'][pos:pos+len(mod_city)]
-             leg['office_street'] = leg['office_address'][:pos-1] #rm the space
-             break
-    if leg.get('office_city') is None:
-       cur.execute("SELECT * FROM zips WHERE zipcode = %s;", [zip5])
-       for zip_city in cur:
-          print(zip_city[3])
-          print(re.sub(r'\s+', ' ', re.sub(r'[^0-9a-zA-Z]',' ', zip_city[3])).upper().replace('SAINT', 'ST'))
-       print(leg['office_address'])
-       print("No city found", f)
-       continue
-    leg['office_street'] = leg['office_street'].replace('P.O.', 'PO').\
+
+    if address['city'] is None:
+       raise Exception("No cities in the found zipcode match the raw address string.\n\tRaw: %s\n\tCanidates: %s" % (raw_address_upper, cities))
+
+    # It should be PO Box, not anything else
+    # Pub 28 sec 2.28
+    # http://pe.usps.com/text/pub28/28c2_037.htm
+    address['street'] = address['street'].replace('P.O.', 'PO').\
                                 replace('P O', 'PO').\
                                 replace('P. O.', 'PO').\
                                 replace('BOX', 'Box')
-    if leg.get('phone') is None:
-       phone_match = re.finditer(r'((Work)|(Cell)|(Session))\s*-?\s*(\(?\d{3}\)?\s*\d{3}-?\d{4})', leg['office_address'])
-       for pos_phone in phone_match:
-          if pos_phone.start() > matches.end():
-             leg['phone'] =  re.sub(r'\D', '', pos_phone.group(5))
+
+    # Some of the raw address strings contain phone contact information as well.
+    # So far they all seem to be of the type "type - number" so we're going to go
+    # with that
+    phone_match = re.finditer(r'((Work)|(Cell)|(Session))\s*-?\s*(\(?\d{3}\)?\s*\d{3}-?\d{4})', raw_address)
+    for pos_phone in phone_match:
+       if pos_phone.start() > zipcode_match.end():
+          address['phone'] =  re.sub(r'\D', '', pos_phone.group(5))
+    return address
 
 with open('legislators.csv', 'w') as csv_file:
    out = csv.DictWriter(csv_file, [
@@ -88,7 +166,7 @@ with open('legislators.csv', 'w') as csv_file:
       'fax'
    ], extrasaction='ignore')
    out.writeheader()
-   for root, dirs, filenames in os.walk('legislators'):
+   for root, dirs, filenames in os.walk('openstates.org/legislators'):
       for f in filenames:
          #if not f.startswith('MN'):
          #   continue
@@ -130,33 +208,12 @@ with open('legislators.csv', 'w') as csv_file:
                if leg['email'].endswith('.ne'):
                   leg['email'] = leg['email'] + 't'
 
+            try:
+               address = string_to_address(leg['office_address'])
+            except Exception as e:
+               print(e)
+               continue
+
+            for part in address:
+               leg[part] = address[part]
             out.writerow(leg)
-
-
-               # Just until I get this in git
-               #print("Real address, skipping")
-               #continue
-               #url = "http://maps.googleapis.com/maps/api/geocode/json?"
-               #url = url + urllib.parse.urlencode({'address': leg['office_address'], 'sensor':'true'})
-               #res = urllib.request.urlopen(url)
-               #ret = res.readall()
-               #enc = res.headers.get_content_charset()
-               #ecd = ret.decode(enc)
-               #geocoded = json.loads(ecd)
-               ##time.sleep(2)
-               #if 'results' in geocoded:
-               #   geocoded = geocoded['results']
-               #   if len(geocoded):
-               #      geocoded = geocoded[0]
-               #      if 'address_components' in geocoded:
-               #         for part in geocoded['address_components']:
-               #            if 'street_number' in part['types']:
-               #               leg['office_street_num'] = part['short_name']
-               #            elif 'route' in part['types']:
-               #               leg['office_street'] = part['short_name']
-               #            elif 'locality' in part['types']:
-               #               leg['office_city'] = part['short_name']
-               #            elif 'administrative_area_level_1' in part['types']:
-               #               leg['office_state'] = part['short_name']
-               #            elif 'postal_code' in part['types']:
-               #               leg['office_zip'] = part['short_name']
