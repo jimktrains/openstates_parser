@@ -249,7 +249,8 @@ def string_to_address(raw_address):
     zip5 = zipcode_match.group(2)
     zip4 = zipcode_match.group(3)
 
-    # This is a super naive way of doing this
+    # This is a super naive way of doing this, but
+    # there were quite a few misspellings in the data
     # We create a sliding window, requiring the character
     # befor the window to be not alphanumeric (assuming
     # a space doesn't work because some people don't use spaces:-\)
