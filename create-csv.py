@@ -18,6 +18,43 @@ def powerset(iterable):
    s = list(iterable)
    return chain.from_iterable(combinations(s, r) for r in range(len(s)+1))
 
+def check_google_because_I_give_up(raw_address):
+   address = {
+     'street_number': None, # This isn't yet parsed out, but it's on the list
+     'street': None, # PO Boxes will be stuck into this field, fwiw
+                    # Street numbers + street are currently kept in this field
+     'city': None,
+     'state': None,
+     'zipcode': None,
+     'phone': None # Yes, Yes, this isn't part of an address, but a lot of the raw data
+                 # has phone numbers in them and we need to collect them
+   }
+   url = "http://maps.googleapis.com/maps/api/geocode/json?"
+   url = url + urllib.parse.urlencode({'address': raw_address, 'sensor':'false'})
+   res = urllib.request.urlopen(url)
+   ret = res.readall()
+   enc = res.headers.get_content_charset()
+   ecd = ret.decode(enc)
+   geocoded = json.loads(ecd)
+   #time.sleep(2)
+   if 'results' in geocoded:
+      geocoded = geocoded['results']
+      if len(geocoded):
+         geocoded = geocoded[0]
+         if 'address_components' in geocoded:
+            for part in geocoded['address_components']:
+               if 'street_number' in part['types']:
+                  address['street_num'] = part['short_name']
+               elif 'route' in part['types']:
+                  address['street'] = part['short_name']
+               elif 'locality' in part['types']:
+                  address['city'] = part['short_name']
+               elif 'administrative_area_level_1' in part['types']:
+                  address['state'] = part['short_name']
+               elif 'postal_code' in part['types']:
+                  address['zip'] = part['short_name']
+
+
 def zipcode_to_city_list(zipcode):
     # This will return all of the cities that have out best-guess zipcode
     cur.execute("SELECT * FROM zips WHERE zipcode = %s;", [zipcode])
@@ -56,8 +93,41 @@ def string_to_address(raw_address):
       'zipcode': None,
       'phone': None # Yes, Yes, this isn't part of an address, but a lot of the raw data
                   # has phone numbers in them and we need to collect them
-
     }
+
+    # OK! Special cases time!
+    # =======================
+    # The data only has "_____ HOB", "___ CB", 
+    # "___ Farnum Bldg", or "___ Capitol Bldg"for Michigan
+    # If another state in the data starts doing then then we'll have to get creative
+    #house
+    if 6 == raw_address.find('HOB'):
+      address['street'] = raw_address + "\n124 North Capitol Avenue\nPO Box 30014"
+      address['city']   = "Lansing"
+      address['state']  = "MI"
+      address['zip']    =  "48909-7514"
+      return address
+    if 4 == raw_address.find('CB'):
+      address['street'] = raw_address + "\nPO Box 30014"
+      address['city']   = "Lansing"
+      address['state']  = "MI"
+      address['zip']    = "48909-7514"
+      return address
+    # Senate
+    if -1 != raw_address.find("Capitol Bldg") or -1 != raw_address.find("Farnum Bldg"):
+      address['street'] = raw_address + "\nPost Office Box 30036"
+      address['city']   = "Lansing"
+      address['state']  = "MI"
+      address['zip']    = "48909-7536"
+      return address
+
+    # The data only has "Hawaii State Capitol Room ___"
+    if 0 == raw_address.find("Hawaii State Capitol"):
+      address['street'] = raw_address + "\n415 South Beretania St."
+      address['city']   = "Honolulu"
+      address['street'] = "HI"
+      address['zip']    = "96813"
+      return address
 
     # Commas and extra spaces are annoying
     # burn them!
@@ -82,7 +152,7 @@ def string_to_address(raw_address):
        if canidate_zipcode.group(3) is not None:
           break
     if not good_zip_found:
-      raise Exception('No canidate zipcode found')
+      raise Exception("No canidate zipcode found.\n\tRaw: %s" % raw_address)
 
     zipcode_match = canidate_zipcode
 
@@ -120,6 +190,13 @@ def string_to_address(raw_address):
           address['street'] = raw_address[:city_start_index-1] #rm the space
           break
 
+    # At this point the failurs I'm seeing are related to
+    # cities not in my zipcode <-> city database
+    # I could get more creative, but I don't know if its
+    # worth it right now
+    address = check_google_because_I_give_up(raw_address)
+
+    # OK, I really don't know what's going on
     if address['city'] is None:
        raise Exception("No cities in the found zipcode match the raw address string.\n\tRaw: %s\n\tCanidates: %s" % (raw_address_upper, cities))
 
@@ -168,7 +245,7 @@ with open('legislators.csv', 'w') as csv_file:
    out.writeheader()
    for root, dirs, filenames in os.walk('openstates.org/legislators'):
       for f in filenames:
-         #if not f.startswith('MN'):
+         #if not f.startswith('HI'):
          #   continue
          #print("working on: ",f)
          with open(os.path.join(root, f), 'r') as json_file:
@@ -211,6 +288,7 @@ with open('legislators.csv', 'w') as csv_file:
             try:
                address = string_to_address(leg['office_address'])
             except Exception as e:
+               print("Problem with file '%s'" % f)
                print(e)
                continue
 
