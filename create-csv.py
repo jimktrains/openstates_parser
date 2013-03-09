@@ -19,7 +19,7 @@ opts.add_option('-D', '--db', dest='db_name', help="Database to log into",metava
 opts.add_option('-d', '--host', dest='db_host', help="Database host to log into (Default: localhost)",metavar="DB_HOST")
 opts.add_option('-v', '--verbosity', dest='verbosity', help="How much should I complain? OFF, CRITICAL, ERROR, WARNING, INFO or DEBUG (Default: DEBUG)", metavar="VERBOSITY")
 opts.add_option('-c', '--config', dest='config', help="Location of a config file",metavar="CONFIG")
-opts.add_option('-o', '--outfile', dest='outfile', help="Name of the output file (- is stdout) (Default: ./legislators.csv)",metavar="OUTFILE", default="./legislators.csv")
+opts.add_option('-o', '--outfile', dest='outfile', help="Name of the output file (- is stdout) (Default: ./legislators.csv)",metavar="OUTFILE")
 opts.add_option('-l', '--logfile', dest='logfile', help="Name of the log file (- is stderr) (Default: -)",metavar="LOGFILE")
 opts.add_option('-i', '--indir', dest='indir', help="Location of the input directory (Default: ./openstates.org/legislators)",metavar="INDIR")
 
@@ -47,11 +47,12 @@ if options.logfile is None: options.logfile = '-'
 if options.indir is None: options.indir = './openstates.org/legislators'
 if options.outfile is None: options.outfile = './legislators.csv'
 
+# Doesn't quite work yet....
+if options.outfile == '-':
+   options.outfile = sys.stdout
 
-conn = psycopg2.connect(database=options.db_name, user=options.db_user)
-cur = conn.cursor()
-
-
+# Convert log levels and file into
+# a logger
 log_levels = {
    "OFF": None,
    "CRITICAL": logging.CRITICAL,
@@ -72,10 +73,9 @@ if options.logfile == '-':
    hdlr = logging.StreamHandler(options.logfile)
 else:
    hdlr = logging.FileHandler(options.logfile)
-if options.outfile == '-':
-   options.outfile = sys.stdout
 
-
+# Create our logger
+# Yes, we should make this local and pass it around...
 # Modified from
 # http://docs.python.org/3/library/logging.html
 logger = logging.getLogger('openstates')
@@ -84,6 +84,11 @@ formatter = logging.Formatter('%(cur_file)s %(message)s')
 hdlr.setFormatter(formatter)
 logger.addHandler(hdlr) 
 logger.setLevel(options.verbosity)
+
+# Create a global db connection
+# Yes, we should make this local and pass it around...
+conn = psycopg2.connect(database=options.db_name, user=options.db_user)
+cur = conn.cursor()
 
 # Taken from
 # http://docs.python.org/2/library/itertools.html#recipes
