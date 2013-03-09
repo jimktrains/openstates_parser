@@ -111,7 +111,6 @@ def check_google_because_I_give_up(raw_address):
    enc = res.headers.get_content_charset()
    ecd = ret.decode(enc)
    geocoded = json.loads(ecd)
-   #time.sleep(2)
    if 'results' in geocoded:
       geocoded = geocoded['results']
       if len(geocoded):
@@ -139,6 +138,10 @@ def zipcode_to_city_list(zipcode):
     # This list of lambdas are a collection of changes that
     # could be made to an address. They should accept and return
     # in all caps with no punctuation
+    # This is only a small portion of the possible modifications
+    # but I was only targeting common ones.
+    # The list is of Lambdata, not tuples because
+    # I originally had modifications that wern't simple subsitutions
     base_city_modifications = [
       lambda t : (t[0].replace('SAINT', 'ST'), t[1]),
       lambda t : (t[0].replace('CENTER', 'CTR'), t[1]),
@@ -148,6 +151,9 @@ def zipcode_to_city_list(zipcode):
       lambda t : (t[0].replace('NORTH', 'N'), t[1]),
       lambda t : (t[0].replace('SOUTH', 'S'), t[1])
     ]
+    # Now lets take all combinations of our modifications
+    # and apply them to the base city and append all the possible
+    # changes to our list of cities
     city_modifications = powerset(base_city_modifications)
     mod_city_names = []
     for city_state in zips:
@@ -157,9 +163,7 @@ def zipcode_to_city_list(zipcode):
          for mod in mods:
             c = mod(c)
          mod_city_names.append(c)
-    def len_0(x):
-      return len(x[0])
-    return set(sorted(zips + mod_city_names, key=len_0, reverse=True))
+    return set(sorted(zips + mod_city_names, key=lambda x : len(x[0]), reverse=True))
 
 def string_to_address(raw_address):
     original_raw_address = raw_address
@@ -240,23 +244,25 @@ def string_to_address(raw_address):
     zip5 = zipcode_match.group(2)
     zip4 = zipcode_match.group(3)
 
+    # This is a super naive way of doing this
+    # We create a sliding window, requiring the character
+    # befor the window to be not alphanumeric (assuming
+    # a space doesn't work because some people don't use spaces:-\)
+    # the length of the canidate city and slide it from index 5
+    # to the end. (Why 5? The city won't be that early
+    # in the string.) We then take the contents of the
+    # sliding window and calculator the Jaro-Winkler
+    # Distance (https://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance)
+    # of it and the canidate.  We then take the best
+    # window, and if its score is greater greater than
+    # 90% (Why 90%? I felt like it?) we'll use that as
+    # the city, otherwise we discard and move on.
     raw_address_upper = raw_address.upper()
     cities = zipcode_to_city_list(zip5)
     best_city_start_index = None
     best_city_name = None
     best_score = 0
     for (canidate_city, canidate_state) in cities:
-       # This is a super naive way of doing this
-       # We create a sliding window the length of
-       # the canidate city and slide it from index 5
-       # to the end. (Why 5? The city won't be that early
-       # in the string.) We then take the contents of the
-       # sliding window and calculator the Jaro-Winkler
-       # Distance (https://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance)
-       # of it and the canidate.  We then take the best
-       # window, and if its score is greater greater than
-       # 90% (Why 90%? I felt like it?) we'll use that as
-       # the city, otherwise we discard and move on.
        for i in range(5, zipcode_match.start()):
          if not raw_address_upper[i-1].isalnum():
             score = jellyfish.jaro_distance(canidate_city, raw_address_upper[i:i+len(canidate_city)])
@@ -350,17 +356,24 @@ def string_to_address(raw_address):
          "Leader": "LDR",
       }
       address['street'] = address['street'].replace('.', '')
+      # We only want to add a preciding or trailing newline
+      # if we found a word, not just a suffix or prefix,
+      # and that word isn't the start or end of a line
       for term in terms_to_break_before:
          address['street'] = address['street'].replace(" %s " % term, "\n%s " % term, 1)
       for term in terms_to_break_after:
-         address['street'] = address['street'].replace("%s " % term, "%s\n" % term, 1)
+         address['street'] = address['street'].replace(" %s " % term, " %s\n" % term, 1)
+
       # Check if we fixed or did anything?
       # If not a last ditch effort is to replace 
-      # what we can with abbreviations
+      # what we can with abbreviations. We search
+      # only for full words, not prefixes or suffixes.
+      #
+      # i.e.: Abbr. ALL THAT THINGS!
       for first_line in address['street'].split("\n"):
          if len(first_line) > 40 or len(first_line.split(' ')) > 8:
             for term in terms_to_switch:
-               address['street'] = re.sub(r"%s(\b)" % term, r"%s\1" % terms_to_switch[term], address['street'])
+               address['street'] = re.sub(r"(\b)%s(\b)" % term, r"\1%s\2" % terms_to_switch[term], address['street'])
     return address
 
 with open(options.outfile, 'w') as csv_file:
@@ -374,10 +387,10 @@ with open(options.outfile, 'w') as csv_file:
       'middle_name',
       'last_name',
       'suffix',
-      'chamber',
-      'level',
-      'district',
       'state',
+      'level',
+      'chamber',
+      'district',
       'office_address',
       'office_street_num',
       'office_street',
@@ -389,6 +402,7 @@ with open(options.outfile, 'w') as csv_file:
       'fax'
    ], extrasaction='ignore')
    out.writeheader()
+
    for root, dirs, filenames in os.walk(options.indir):
       for f in filenames:
          log_extra = {"cur_file": f}
@@ -448,11 +462,14 @@ with open(options.outfile, 'w') as csv_file:
                   leg['email'] = leg['email'] + 't'
 
             # Let's try to make sense of the address we have
+            address = {}
             try:
                address = string_to_address(leg['office_address'])
             except Exception as e:
                logger.error(e, extra=log_extra)
                continue
+            # If we made sense of the address, lets
+            # import it into our legislator's record
             for part in address:
                if part == "phone":
                   leg[part] = address[part]
