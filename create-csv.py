@@ -3,6 +3,7 @@ from itertools import *
 from optparse import OptionParser
 import configparser
 import csv
+import getpass
 import jellyfish
 import json
 import logging
@@ -18,6 +19,7 @@ opts = OptionParser()
 opts.add_option('-u', '--user', dest='db_user', help="User to log into the database as",metavar="USER")
 opts.add_option('-D', '--db', dest='db_name', help="Database to log into",metavar="DB_NAME")
 opts.add_option('-d', '--host', dest='db_host', help="Database host to log into (Default: localhost)",metavar="DB_HOST")
+opts.add_option('-p', '--password', dest='db_pass', action="store_true", help="If present, the program will prompt you for a database password (Default: False)")
 opts.add_option('-v', '--verbosity', dest='verbosity', help="How much should I complain? OFF, CRITICAL, ERROR, WARNING, INFO or DEBUG (Default: DEBUG)", metavar="VERBOSITY")
 opts.add_option('-c', '--config', dest='config', help="Location of a config file",metavar="CONFIG")
 opts.add_option('-o', '--outfile', dest='outfile', help="Name of the output file (- is stdout) (Default: ./legislators.csv)",metavar="OUTFILE")
@@ -35,6 +37,7 @@ if options.config is not None:
       if 'user' in config['database'] and options.db_user is None: options.db_user = config['database']['user']
       if 'host' in config['database'] and options.db_host is None: options.db_host = config['database']['host']
       if 'name' in config['database'] and options.db_name is None: options.db_name = config['database']['name']
+      if 'ask_password' in config['database'] and options.db_pass is None: options.db_pass = 'True' == config['database']['ask_password']
    if 'logging' in config:
       if 'level' in config['logging'] and options.verbosity is None:  options.verbosity = config['logging']['level']
       if 'file' in config['logging'] and options.logfile is None: options.logfile = config['logging']['file']
@@ -48,8 +51,13 @@ if options.logfile is None: options.logfile = '-'
 if options.indir is None: options.indir = './openstates.org/legislators'
 if options.outfile is None: options.outfile = './legislators.csv'
 
+if options.db_pass:
+   options.db_pass = getpass.getpass(prompt="Database Password for %s:" % options.db_user)
+
 # Doesn't quite work yet....
 if options.outfile == '-':
+   print("This option doesn't work yet")
+   exit()
    options.outfile = sys.stdout
 
 # Convert log levels and file into
@@ -88,7 +96,7 @@ logger.setLevel(options.verbosity)
 
 # Create a global db connection
 # Yes, we should make this local and pass it around...
-conn = psycopg2.connect(database=options.db_name, user=options.db_user)
+conn = psycopg2.connect(database=options.db_name, user=options.db_user, password=options.db_pass)
 cur = conn.cursor()
 
 # Taken from
